@@ -7,13 +7,21 @@ import re
 import shutil
 import sys
 import zipfile
-import tkinter as tk
-from tkinter import filedialog
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+# Tk is only used for native folder dialogs in the packaged desktop app.
+# Streamlit Community Cloud runs in a headless Linux environment where
+# Python's optional _tkinter extension is not installed.
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except ImportError:
+    tk = None
+    filedialog = None
 
 try:
     from thermal_analyzer.config import load_component_configs, DEFAULT_TIME_COLUMN
@@ -173,12 +181,36 @@ def get_steady_cached(run, win, slope, cache_key):
 
 
 # ── Folder picker helpers ──────────────────────────────────────────────────────
+def _folder_dialog_available() -> bool:
+    if tk is None or filedialog is None:
+        return False
+    if sys.platform.startswith("linux"):
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return True
+
+
 def pick_folder(session_key: str):
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes("-topmost", 1)
-    selected = filedialog.askdirectory(master=root, title="Select folder")
-    root.destroy()
+    if not _folder_dialog_available():
+        st.error(
+            "Native folder browsing is unavailable in this cloud environment. "
+            "Upload files through a file-upload control or enter a path that "
+            "exists on the server."
+        )
+        return
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.wm_attributes("-topmost", 1)
+        selected = filedialog.askdirectory(master=root, title="Select folder")
+    except Exception as exc:
+        st.error(f"Unable to open the native folder dialog: {exc}")
+        return
+    finally:
+        if root is not None:
+            root.destroy()
+
     if selected:
         st.session_state[session_key] = selected
         st.rerun()
@@ -195,8 +227,22 @@ def folder_picker_widget(label: str, session_key: str) -> str:
             st.session_state[session_key] = path
     with col_btn:
         st.write("")
-        if st.button("Browse", key=f"{session_key}_btn"):
+        if st.button(
+            "Browse",
+            key=f"{session_key}_btn",
+            disabled=not _folder_dialog_available(),
+            help=(
+                "Native folder browsing is available in the desktop app only."
+                if not _folder_dialog_available()
+                else None
+            ),
+        ):
             pick_folder(session_key)
+    if not _folder_dialog_available():
+        st.caption(
+            "Folder browsing is disabled on Community Cloud because it cannot "
+            "access folders on your computer."
+        )
     return st.session_state.get(session_key, "")
 
 
