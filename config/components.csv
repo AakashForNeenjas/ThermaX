@@ -1,0 +1,32 @@
+name_raw            ,display_name          ,group      ,max_limit  ,warning_limit  ,critical_limit  ,color_hint  
+DAB(M12)            ,DAB MOSFET M12        ,DAB        ,120,100,125,red         
+PFC(M4)             ,PFC MOSFET M4         ,PFC        ,120,100,125,blue        
+Resonant capacitor  ,Resonant Cap          ,DAB        ,85,75,95,green       
+MCU                 ,Microcontroller       ,Control    ,85,70,90,purple      
+Oscillator SMD      ,Oscillator            ,Control    ,85,70,90,orange      
+HV CMC              ,HV Common Mode Choke  ,Magnetics  ,120,100,125,brown       
+DAB(M8)             ,DAB(M8)               ,DAB        ,120,100,125,            
+DAB(M11)            ,DAB(M11)              ,DAB        ,120,100,125,            
+DAB(M7)             ,DAB(M7)               ,DAB        ,120,100,125,            
+PFC(M5)             ,PFC(M5)               ,PFC        ,120,100,125,            
+PFC(M1)             ,PFC(M1)               ,PFC        ,120,100,125,            
+PFC(M2)             ,PFC(M2)               ,PFC        ,120,100,125,            
+Transform DAV       ,Transform DAB         ,Magnetics  ,120,100,125,            
+SR MOSFET(M16)      ,SR MOSFET(M16)        ,DAB        ,120,100,125,            
+Snubber(M20)        ,Snubber(M20)          ,Snubber    ,120,100,125,            
+HVDC(M13)           ,HVDC(M13)             ,HVDC       ,120,100,125,            
+HVDC(M14)           ,HVDC(M14)             ,HVDC       ,120,100,125,            
+HVDC(M10)           ,HVDC(M10)             ,HVDC       ,120,100,125,            
+HVDC(M9)            ,HVDC(M9)              ,HVDC       ,120,100,125,            
+Leakage Inductor    ,Leakage Inductor      ,Magnetics  ,120,100,125,            
+Bulck Capacitor     ,Bulk Capacitor        ,Input      ,95,85,105,            
+Input Mosfet(M3)    ,Input Mosfet(M3)      ,Input      ,120,100,125,            
+Input Mosfet(M6)    ,Input Mosfet(M6)      ,Input      ,120,100,125,            
+Buck(M19)           ,Buck(M19)             ,Buck       ,120,100,125,            
+Buck(M18)           ,Buck(M18)             ,Buck       ,120,100,125,            
+Buck silver Cap     ,Buck silver Cap       ,Buck       ,120,100,125,            
+LV CMC              ,LV CMC                ,Magnetics  ,120,100,125,            
+Aux 2 mosfet        ,Aux 2 mosfet          ,Aux        ,120,100,125,            
+Aux 1 mosfet        ,Aux 1 mosfet          ,Aux        ,120,100,125,            
+AUX Tx 1 winding    ,AUX Tx 1 winding      ,Aux        ,120,100,125,            
+AUX Tx 2 winding    ,AUX Tx 2 winding      ,Aux        ,120,100,125,            

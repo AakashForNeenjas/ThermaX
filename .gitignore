@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Credentials
+.env
+.streamlit/secrets.toml
+*.pem
+
+# Build and packaging output
+build/
+dist/
+out/
+*.egg-info/
+
+# Generated caches and reports
+.pytest_cache/
+reports/
