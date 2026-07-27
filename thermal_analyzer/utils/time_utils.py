@@ -28,7 +28,7 @@ def parse_time_string(time_str: str) -> float:
         td = pd.to_timedelta(time_str)
         return td.total_seconds()
     except Exception:
-        return 0.0
+        return float("nan")
 
 def seconds_to_hms(seconds: float) -> str:
     """Convert seconds to HH:MM:SS string."""

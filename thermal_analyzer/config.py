@@ -40,6 +40,12 @@ def load_component_configs(config_path: str) -> Dict[str, ComponentConfig]:
     else:
         raise ValueError("Unsupported config file format. Use .csv or .json")
         
+    return component_configs_from_records(records)
+
+
+def component_configs_from_records(records) -> Dict[str, ComponentConfig]:
+    """Build validated component configuration objects from record dictionaries."""
+    configs = {}
     for rec in records:
         # Map fields from file to ComponentConfig
         # specific handling for optional fields
@@ -47,15 +53,23 @@ def load_component_configs(config_path: str) -> Dict[str, ComponentConfig]:
         if not name_raw:
             continue
             
+        if name_raw in configs:
+            raise ValueError(f"Duplicate component configuration: {name_raw}")
+        max_limit = float(rec.get("max_limit", DEFAULT_MAX_LIMIT))
+        warning_limit = float(rec.get("warning_limit", DEFAULT_WARNING_LIMIT))
+        critical_limit = float(rec.get("critical_limit", DEFAULT_CRITICAL_LIMIT))
+        if not warning_limit <= max_limit <= critical_limit:
+            raise ValueError(
+                f"Invalid limits for {name_raw}: expected warning <= max <= critical."
+            )
         config = ComponentConfig(
             name_raw=name_raw,
             display_name=rec.get("display_name", name_raw),
             group=rec.get("group", "Default"),
-            max_limit=float(rec.get("max_limit", DEFAULT_MAX_LIMIT)),
-            warning_limit=float(rec.get("warning_limit", DEFAULT_WARNING_LIMIT)),
-            critical_limit=float(rec.get("critical_limit", DEFAULT_CRITICAL_LIMIT)),
+            max_limit=max_limit,
+            warning_limit=warning_limit,
+            critical_limit=critical_limit,
             color_hint=rec.get("color_hint")
         )
         configs[name_raw] = config
-        
     return configs

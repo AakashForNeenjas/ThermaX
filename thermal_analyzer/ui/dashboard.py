@@ -33,13 +33,42 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 try:
-    from thermal_analyzer.config import load_component_configs, DEFAULT_TIME_COLUMN
-    from thermal_analyzer.io.excel_loader import load_thermal_run_from_bytes
-    from thermal_analyzer.io.batch_loader import (
-        load_campaign_from_folder,
-        load_campaign_from_uploads,
+    from thermal_analyzer.config import (
+        DEFAULT_TIME_COLUMN,
+        component_configs_from_records,
+        load_component_configs,
     )
-    from thermal_analyzer.models import TestCampaign
+    from thermal_analyzer.io.excel_loader import load_thermal_run_from_bytes
+    from thermal_analyzer.io.batch_loader import load_campaign_from_folder
+    from thermal_analyzer.io.sources import (
+        SourceValidationError,
+        UploadedFileSource,
+    )
+    from thermal_analyzer.metadata.matching import (
+        DEFAULT_MATCH_FIELDS,
+        match_campaigns,
+    )
+    from thermal_analyzer.metadata.manifest import (
+        load_match_overrides,
+        load_metadata_manifest,
+    )
+    from thermal_analyzer.ui.downloads import (
+        configuration_csv_bytes,
+        configuration_json_bytes,
+        sidecar_json_bytes,
+    )
+    from thermal_analyzer.ui.components.uploads import (
+        campaign_source_ready,
+        campaign_source_widget as render_campaign_source_widget,
+    )
+    from thermal_analyzer.ui.components.metadata import (
+        apply_campaign_metadata_frame,
+        campaign_metadata_frame,
+    )
+    from thermal_analyzer.ui.navigation import MODES
+    from thermal_analyzer.ui.errors import public_error
+    from thermal_analyzer.ui.state import clear_analysis_state
+    from thermal_analyzer.validation import validate_workbook
     from thermal_analyzer.analysis.stats import compute_component_stats
     from thermal_analyzer.analysis.thresholds import evaluate_limits
     from thermal_analyzer.analysis.steady_state import detect_steady_state
@@ -163,13 +192,38 @@ def get_configs(path, _mtime):
     return load_component_configs(path)
 
 
-@st.cache_data(show_spinner=False)
-def load_run_and_stats(file_bytes, file_name, time_column):
-    run = load_thermal_run_from_bytes(file_bytes, file_name, {}, time_column)
+@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
+def load_run_and_stats(
+    file_bytes,
+    file_name,
+    time_column,
+    sheet_name=0,
+    component_columns=None,
+    temperature_unit="°C",
+):
+    run = load_thermal_run_from_bytes(
+        file_bytes,
+        file_name,
+        {},
+        time_column,
+        sheet_name=sheet_name,
+        component_columns=component_columns,
+    )
+    if temperature_unit == "°F":
+        run.data = (run.data - 32.0) * 5.0 / 9.0
     run.run_id = os.path.splitext(file_name)[0]
     run.metadata = parse_metadata_from_filename(run.run_id)
     stats = compute_component_stats(run)
     return run, stats
+
+
+@st.cache_data(show_spinner=False, max_entries=50, ttl=3600)
+def inspect_workbook(file_bytes):
+    workbook = pd.ExcelFile(io.BytesIO(file_bytes))
+    return {
+        sheet: list(workbook.parse(sheet, nrows=5).columns)
+        for sheet in workbook.sheet_names
+    }
 
 
 def _get_session_cache(name):
@@ -259,42 +313,33 @@ def folder_picker_widget(label: str, session_key: str) -> str:
 
 
 def campaign_source_widget(label: str, key_prefix: str) -> dict:
-    """Select a desktop folder or upload multiple Excel files in a browser."""
-    if _folder_dialog_available():
-        source_type = st.radio(
-            f"{label} input",
-            ["Folder", "Upload Excel files"],
-            horizontal=True,
-            key=f"{key_prefix}_source_type",
-        )
-    else:
-        source_type = "Upload Excel files"
-
-    if source_type == "Folder":
-        return {
-            "type": "folder",
-            "path": folder_picker_widget(label, f"{key_prefix}_folder_path"),
-            "files": [],
-        }
-
-    uploaded_files = st.file_uploader(
+    return render_campaign_source_widget(
         label,
-        type=["xlsx"],
-        accept_multiple_files=True,
-        key=f"{key_prefix}_uploads",
-        help="Select all Excel run files that belong to this campaign.",
+        key_prefix,
+        folder_dialog_available=_folder_dialog_available(),
+        folder_picker=folder_picker_widget,
     )
-    return {
-        "type": "uploads",
-        "path": "",
-        "files": uploaded_files or [],
-    }
 
 
-def campaign_source_ready(source: dict) -> bool:
-    if source["type"] == "folder":
-        return bool(source["path"])
-    return bool(source["files"])
+@st.cache_data(show_spinner=False, max_entries=100, ttl=3600)
+def validate_uploaded_workbook(file_name: str, content: bytes, time_column: str):
+    return validate_workbook(file_name, content, time_column=time_column)
+
+
+def show_validation_report(validated) -> None:
+    report = validated.report
+    if not report.issues:
+        st.success(f"{validated.file_name}: validation passed.")
+        return
+    for issue in report.issues:
+        location = f" [{issue.column}]" if issue.column else ""
+        message = f"{validated.file_name}{location}: {issue.message}"
+        if issue.severity.value == "error":
+            st.error(message)
+        elif issue.severity.value == "warning":
+            st.warning(message)
+        else:
+            st.info(message)
 
 
 def load_campaign_source(source: dict, component_configs) -> tuple:
@@ -304,18 +349,44 @@ def load_campaign_source(source: dict, component_configs) -> tuple:
         if not os.path.isdir(path):
             raise ValueError("Selected path is not a valid folder.")
         campaign = load_campaign_from_folder(path, component_configs)
+        _apply_manifest(campaign, source.get("manifest"))
         return campaign, {}, os.path.basename(os.path.normpath(path))
 
     uploaded_pairs = [
         (uploaded_file.name, uploaded_file.getvalue())
         for uploaded_file in source["files"]
     ]
-    campaign, errors = load_campaign_from_uploads(
-        uploaded_pairs,
-        component_configs,
-        DEFAULT_TIME_COLUMN,
+    valid_pairs = []
+    validation_errors = {}
+    for file_name, content in uploaded_pairs:
+        validated = validate_uploaded_workbook(
+            file_name, content, active_time_column
+        )
+        show_validation_report(validated)
+        if validated.report.is_valid:
+            valid_pairs.append((file_name, content))
+        else:
+            validation_errors[file_name] = "; ".join(
+                issue.message for issue in validated.report.errors
+            )
+    if not valid_pairs:
+        raise SourceValidationError("No uploaded workbook passed validation.")
+    campaign, errors = UploadedFileSource(valid_pairs).load(
+        component_configs, active_time_column
     )
+    _apply_manifest(campaign, source.get("manifest"))
+    errors = {**validation_errors, **errors}
     return campaign, errors, "uploaded_campaign"
+
+
+def _apply_manifest(campaign, uploaded_manifest) -> None:
+    if uploaded_manifest is None:
+        return
+    manifest = load_metadata_manifest(uploaded_manifest.getvalue())
+    for run in campaign.runs:
+        key = os.path.basename(run.file_path).casefold()
+        if key in manifest:
+            run.metadata.update(manifest[key])
 
 
 def show_campaign_load_errors(errors: dict) -> None:
@@ -328,18 +399,6 @@ def show_campaign_load_errors(errors: dict) -> None:
 
 
 # ── Inline run-matching (replaces matching.py) ────────────────────────────────
-def match_runs_by_metadata(campaign_a, campaign_b):
-    """Match runs from two campaigns by operating conditions."""
-    _KEYS = {"VAC", "HV", "LV_current", "ambient_temp"}
-
-    def sig(run):
-        keys = sorted(k for k in run.metadata if k in _KEYS)
-        return "|".join(f"{k}={run.metadata[k]}" for k in keys)
-
-    map_b = {sig(r): r for r in campaign_b.runs if sig(r)}
-    return [(ra, map_b[sig(ra)]) for ra in campaign_a.runs if sig(ra) in map_b]
-
-
 # ── Global Defaults editor helpers ────────────────────────────────────────────
 _GLOBAL_DEFAULTS_SPEC = {
     "DEFAULT_TIME_COLUMN":    {"type": "str",   "label": "Time Column Name",              "help": "Excel column used as the time axis"},
@@ -376,25 +435,25 @@ def _write_global_defaults(config_file: str, values: dict):
 
 
 # ── Sidecar JSON writer (Annotation/Notes) ────────────────────────────────────
-def _save_sidecar(folder: str, run_id: str, notes: str, extra_meta: dict):
-    """Write a .json sidecar next to the Excel file with notes + metadata."""
-    path = os.path.join(folder, f"{run_id}.json")
-    data = dict(extra_meta)
-    data["notes"] = notes
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-
 # ── Config loading ─────────────────────────────────────────────────────────────
 try:
     st.sidebar.caption(f"Using: {config_path}")
-    if os.path.isdir(config_path):
-        raise ValueError(f"Config path is a directory: {config_path}")
-    ext = os.path.splitext(config_path)[1].lower()
-    if ext not in [".csv", ".json"]:
-        raise ValueError(f"Unsupported config file format '{ext or '(none)'}'. Use .csv or .json")
-    mtime = os.path.getmtime(config_path) if os.path.exists(config_path) else 0
-    configs = get_configs(config_path, mtime)
+    if "session_config_records" in st.session_state:
+        configs = component_configs_from_records(
+            st.session_state["session_config_records"]
+        )
+        mtime = 0
+        st.sidebar.caption("Session configuration overrides the repository file.")
+    else:
+        if os.path.isdir(config_path):
+            raise ValueError(f"Config path is a directory: {config_path}")
+        ext = os.path.splitext(config_path)[1].lower()
+        if ext not in [".csv", ".json"]:
+            raise ValueError(
+                f"Unsupported config file format '{ext or '(none)'}'. Use .csv or .json"
+            )
+        mtime = os.path.getmtime(config_path) if os.path.exists(config_path) else 0
+        configs = get_configs(config_path, mtime)
     st.sidebar.success(f"Loaded {len(configs)} component configs.")
     if st.sidebar.checkbox("Show Debug Info"):
         st.sidebar.write("Config Keys (first 5):", list(configs.keys())[:5])
@@ -402,21 +461,35 @@ except Exception as e:
     st.sidebar.error(f"Error loading config: {e}")
     configs = {}
 
+active_time_column = st.session_state.get("session_global_defaults", {}).get(
+    "DEFAULT_TIME_COLUMN", DEFAULT_TIME_COLUMN
+)
+
 st.sidebar.header("Steady State Settings")
 window_minutes = st.sidebar.number_input("Window Size (minutes)", min_value=1.0, value=10.0, step=1.0)
 slope_threshold = st.sidebar.number_input("Slope Threshold (°C/min)", min_value=0.01, value=1.0, step=0.05)
 
 mode = st.sidebar.radio(
     "Select Mode",
-    [
-        "Single Run Analysis",
-        "Campaign Analysis",
-        "Component Comparison",
-        "Samples Comparison (A vs B)",
-        "File vs File Comparison",
-        "Configuration Editor",
-    ],
+    MODES,
 )
+if st.sidebar.button("Clear uploaded data", use_container_width=True):
+    clear_analysis_state(st.session_state)
+    for upload_key in (
+        "campaign_uploads",
+        "campaign_manifest",
+        "component_comparison_uploads",
+        "component_comparison_manifest",
+        "sample_a_uploads",
+        "sample_a_manifest",
+        "sample_b_uploads",
+        "sample_b_manifest",
+        "fvf_a",
+        "fvf_b",
+    ):
+        st.session_state.pop(upload_key, None)
+    validate_uploaded_workbook.clear()
+    st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MODE: Single Run Analysis
@@ -429,15 +502,78 @@ if mode == "Single Run Analysis":
         file_bytes = uploaded_file.getvalue()
         if not file_bytes:
             st.error("Uploaded file is empty.")
-            file_bytes = None
+            st.stop()
+
+        try:
+            workbook_structure = inspect_workbook(file_bytes)
+        except Exception:
+            st.error("The uploaded file is not a readable Excel workbook.")
+            st.stop()
+        sheet_names = list(workbook_structure)
+        selected_sheet = st.selectbox(
+            "Worksheet",
+            sheet_names,
+            key="sra_sheet",
+        )
+        available_columns = workbook_structure[selected_sheet]
+        default_time_index = (
+            available_columns.index(active_time_column)
+            if active_time_column in available_columns
+            else 0
+        )
+        selected_time_column = st.selectbox(
+            "Time column",
+            available_columns,
+            index=default_time_index,
+            key="sra_time_column",
+        )
+        selected_components = st.multiselect(
+            "Temperature component columns",
+            [column for column in available_columns if column != selected_time_column],
+            default=[
+                column for column in available_columns
+                if column != selected_time_column
+            ],
+            key="sra_component_columns",
+        )
+        temperature_unit = st.selectbox(
+            "Uploaded temperature unit",
+            ["°C", "°F"],
+            key="sra_temperature_unit",
+        )
+
+        validated_upload = validate_workbook(
+            uploaded_file.name,
+            file_bytes,
+            time_column=selected_time_column,
+            sheet_name=selected_sheet,
+            component_columns=selected_components,
+        )
+        with st.expander(
+            "Input validation",
+            expanded=not validated_upload.report.is_valid,
+        ):
+            show_validation_report(validated_upload)
+            if validated_upload.dataframe is not None:
+                st.dataframe(
+                    validated_upload.dataframe.head(20),
+                    use_container_width=True,
+                )
+        if not validated_upload.report.is_valid:
+            st.error("Fix the validation errors before running analysis.")
+            st.stop()
 
         run = None
         try:
-            if file_bytes is None:
-                raise ValueError("No data to process.")
-
             file_hash = hashlib.sha256(file_bytes).hexdigest()
-            run, stats = load_run_and_stats(file_bytes, uploaded_file.name, DEFAULT_TIME_COLUMN)
+            run, stats = load_run_and_stats(
+                file_bytes,
+                uploaded_file.name,
+                selected_time_column,
+                selected_sheet,
+                selected_components,
+                temperature_unit,
+            )
 
             # Metadata
             st.subheader("Metadata")
@@ -674,20 +810,16 @@ if mode == "Single Run Analysis":
             # ── Run Notes / Annotations (NEW) ─────────────────────────────────
             with st.expander("Run Notes & Annotations", expanded=False):
                 st.markdown(
-                    "Add notes about this run. Use **Save Sidecar JSON** to persist them "
-                    "alongside the original Excel file so they reload on the next analysis."
+                    "Add notes about this run and download them as a portable JSON sidecar."
                 )
                 notes_text = st.text_area("Notes", value=run.notes or "", key="sra_notes")
-                sidecar_folder = st.text_input(
-                    "Folder containing the Excel file (for saving sidecar)",
-                    value="", key="sra_sidecar_folder", placeholder="e.g. C:/Data/runs",
+                st.download_button(
+                    "Download Sidecar JSON",
+                    sidecar_json_bytes(run.run_id, notes_text, run.metadata),
+                    file_name=f"{run.run_id}.json",
+                    mime="application/json",
+                    key="sra_download_sidecar",
                 )
-                if st.button("Save Sidecar JSON", key="sra_save_sidecar"):
-                    if sidecar_folder and os.path.isdir(sidecar_folder):
-                        _save_sidecar(sidecar_folder, run.run_id, notes_text, run.metadata)
-                        st.success(f"Saved {run.run_id}.json in {sidecar_folder}")
-                    else:
-                        st.error("Enter a valid folder path to save the sidecar.")
 
             # ── Data Exports ──────────────────────────────────────────────────
             st.subheader("Data Exports")
@@ -703,6 +835,12 @@ if mode == "Single Run Analysis":
                 html_str = generate_html_report_for_run(
                     run, stats, limits, steady,
                     plotly_figs=[fig_ts, fig_bar],
+                    provenance={
+                        "source_sha256": file_hash,
+                        "configuration": os.path.basename(config_path),
+                        "steady_window_minutes": window_minutes,
+                        "steady_slope_threshold": slope_threshold,
+                    },
                 )
                 st.session_state["run_report_id"] = run.run_id
                 st.session_state["run_report_html"] = html_str
@@ -711,7 +849,7 @@ if mode == "Single Run Analysis":
                 st.success("Report generated — click Download below.")
 
         except Exception as e:
-            st.error(f"Error analysing file: {e}")
+            st.error(public_error("Unable to analyze the uploaded file", e))
 
         if (
             run is not None
@@ -759,7 +897,7 @@ elif mode == "Campaign Analysis":
                     else:
                         st.warning("No valid Excel files found.")
             except Exception as exc:
-                st.error(f"Unable to load campaign: {exc}")
+                st.error(public_error("Unable to load the campaign", exc))
     else:
         st.info("Upload one or more Excel files to begin.")
 
@@ -768,6 +906,15 @@ elif mode == "Campaign Analysis":
         worst = res["worst"]
         folder_name = res["folder_name"]
         campaign = res["campaign"]
+
+        with st.expander("Review and edit run metadata", expanded=False):
+            campaign_metadata = st.data_editor(
+                campaign_metadata_frame(campaign),
+                disabled=["run_id"],
+                key="ca_metadata_editor",
+                use_container_width=True,
+            )
+            apply_campaign_metadata_frame(campaign, campaign_metadata)
 
         # ── Worst Case ────────────────────────────────────────────────────────
         st.subheader("Worst Case Analysis (Top 20)")
@@ -987,13 +1134,21 @@ elif mode == "Component Comparison":
                     st.session_state["cc_campaign"] = campaign
                     st.success(f"Loaded {len(st.session_state['cc_campaign'].runs)} runs.")
             except Exception as exc:
-                st.error(f"Unable to load files: {exc}")
+                st.error(public_error("Unable to load the comparison files", exc))
     else:
         st.info("Upload one or more Excel files to begin.")
         st.session_state["cc_campaign"] = None
 
     if st.session_state["cc_campaign"]:
         campaign = st.session_state["cc_campaign"]
+        with st.expander("Review and edit run metadata", expanded=False):
+            component_metadata = st.data_editor(
+                campaign_metadata_frame(campaign),
+                disabled=["run_id"],
+                key="cc_metadata_editor",
+                use_container_width=True,
+            )
+            apply_campaign_metadata_frame(campaign, component_metadata)
         all_comps_cc = sorted(campaign.list_components())
 
         comp_name = st.selectbox("Select Component", all_comps_cc, key="cc_comp_sel")
@@ -1097,7 +1252,36 @@ elif mode == "Samples Comparison (A vs B)":
         st.markdown("**Sample B — DUT / New Design**")
         source_b = campaign_source_widget("Sample B files", "sample_b")
 
-    if st.button("Compare Samples", key="sab_compare"):
+    match_fields = st.multiselect(
+        "Operating-condition fields used for matching",
+        list(DEFAULT_MATCH_FIELDS),
+        default=list(DEFAULT_MATCH_FIELDS),
+        key="sab_match_fields",
+    )
+    match_map_col, match_template_col = st.columns([2, 1])
+    manual_match_file = match_map_col.file_uploader(
+        "Manual run matches (optional CSV)",
+        type=["csv"],
+        key="sab_manual_matches",
+        help="Columns: sample_a_run_id, sample_b_run_id",
+    )
+    match_template_col.write("")
+    match_template_col.download_button(
+        "Manual-match template",
+        "sample_a_run_id,sample_b_run_id\n",
+        file_name="manual_matches.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    if not match_fields:
+        st.warning("Select at least one matching field.")
+
+    if st.button(
+        "Compare Samples",
+        key="sab_compare",
+        disabled=not match_fields,
+    ):
         if not campaign_source_ready(source_a) or not campaign_source_ready(source_b):
             st.error("Select files for both Sample A and Sample B.")
         else:
@@ -1112,10 +1296,68 @@ elif mode == "Samples Comparison (A vs B)":
                         {f"Sample B / {name}": error for name, error in errors_b.items()}
                     )
             except Exception as exc:
-                st.error(f"Unable to load samples: {exc}")
+                st.error(public_error("Unable to load the samples", exc))
             else:
-                matches = match_runs_by_metadata(camp_a, camp_b)
+                try:
+                    match_result = match_campaigns(
+                        camp_a,
+                        camp_b,
+                        fields=match_fields,
+                        manual_overrides=(
+                            load_match_overrides(manual_match_file.getvalue())
+                            if manual_match_file is not None
+                            else None
+                        ),
+                    )
+                except ValueError as exc:
+                    st.error(f"Unable to match samples: {exc}")
+                    st.stop()
+                matches = [
+                    (match.run_a, match.run_b)
+                    for match in match_result.matches
+                ]
                 st.info(f"Matched {len(matches)} runs based on operating conditions.")
+                if match_result.unmatched_a or match_result.unmatched_b:
+                    st.warning(
+                        f"Unmatched runs — Sample A: {len(match_result.unmatched_a)}, "
+                        f"Sample B: {len(match_result.unmatched_b)}."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {"sample": "A", "run_id": run.run_id}
+                                for run in match_result.unmatched_a
+                            ]
+                            + [
+                                {"sample": "B", "run_id": run.run_id}
+                                for run in match_result.unmatched_b
+                            ]
+                        ),
+                        use_container_width=True,
+                    )
+                if match_result.ambiguous:
+                    st.error(
+                        f"{len(match_result.ambiguous)} operating condition(s) "
+                        "have duplicate candidates and were not compared."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "condition": str(signature),
+                                    "sample_a_runs": ", ".join(
+                                        run.run_id for run in runs_a
+                                    ),
+                                    "sample_b_runs": ", ".join(
+                                        run.run_id for run in runs_b
+                                    ),
+                                }
+                                for signature, (runs_a, runs_b)
+                                in match_result.ambiguous.items()
+                            ]
+                        ),
+                        use_container_width=True,
+                    )
 
                 if matches:
                     rows = []
@@ -1211,9 +1453,26 @@ elif mode == "File vs File Comparison":
     if file_a and file_b:
         try:
             bytes_a, bytes_b = file_a.getvalue(), file_b.getvalue()
+            validated_a = validate_uploaded_workbook(
+                file_a.name, bytes_a, active_time_column
+            )
+            validated_b = validate_uploaded_workbook(
+                file_b.name, bytes_b, active_time_column
+            )
+            with st.expander(
+                "Input validation",
+                expanded=not (
+                    validated_a.report.is_valid
+                    and validated_b.report.is_valid
+                ),
+            ):
+                show_validation_report(validated_a)
+                show_validation_report(validated_b)
+            if not validated_a.report.is_valid or not validated_b.report.is_valid:
+                raise ValueError("Fix the validation errors before comparing files.")
             with st.spinner("Loading files..."):
-                run_a, stats_a = load_run_and_stats(bytes_a, file_a.name, DEFAULT_TIME_COLUMN)
-                run_b, stats_b = load_run_and_stats(bytes_b, file_b.name, DEFAULT_TIME_COLUMN)
+                run_a, stats_a = load_run_and_stats(bytes_a, file_a.name, active_time_column)
+                run_b, stats_b = load_run_and_stats(bytes_b, file_b.name, active_time_column)
 
             hash_a = hashlib.sha256(bytes_a).hexdigest()
             hash_b = hashlib.sha256(bytes_b).hexdigest()
@@ -1392,7 +1651,7 @@ elif mode == "File vs File Comparison":
                 )
 
         except Exception as e:
-            st.error(f"Error during comparison: {e}")
+            st.error(public_error("Unable to compare the uploaded files", e))
     else:
         st.info("Upload both File A and File B to begin comparison.")
 
@@ -1401,7 +1660,11 @@ elif mode == "File vs File Comparison":
 # ══════════════════════════════════════════════════════════════════════════════
 elif mode == "Configuration Editor":
     st.header("Configuration Editor")
-    st.markdown("Edit component limits and groups directly. Changes are saved to `config/components.csv`.")
+    cloud_mode = not _folder_dialog_available()
+    st.markdown(
+        "Edit component limits and groups. In the web app, changes apply only "
+        "to your current session and can be downloaded."
+    )
     st.caption(f"Editing file: {config_path}")
 
     config_ext = os.path.splitext(config_path)[1].lower()
@@ -1414,7 +1677,7 @@ elif mode == "Configuration Editor":
         else:
             raw_df = pd.read_csv(config_path)
     except Exception as e:
-        st.error(f"Failed to load config file: {e}")
+        st.error(public_error("Unable to load the configuration", e))
         raw_df = pd.DataFrame(
             columns=["name_raw", "display_name", "group", "max_limit",
                      "warning_limit", "critical_limit", "color_hint"]
@@ -1422,23 +1685,49 @@ elif mode == "Configuration Editor":
 
     edited_df = st.data_editor(raw_df, num_rows="dynamic", use_container_width=True)
 
-    if st.button("Save Configuration", type="primary"):
+    cfg_apply, cfg_csv, cfg_json = st.columns(3)
+    if cfg_apply.button(
+        "Apply to Session" if cloud_mode else "Save Configuration",
+        type="primary",
+        use_container_width=True,
+    ):
         try:
-            out_dir = os.path.dirname(os.path.abspath(config_path))
-            if out_dir:
-                os.makedirs(out_dir, exist_ok=True)
-
-            if config_ext == ".json":
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(edited_df.to_dict(orient="records"), f, indent=2)
+            records = edited_df.to_dict(orient="records")
+            component_configs_from_records(records)
+            if cloud_mode:
+                st.session_state["session_config_records"] = records
+                st.session_state.pop("limits_cache", None)
+                st.success("Configuration applied to this browser session.")
             else:
-                edited_df.to_csv(config_path, index=False)
-            get_configs.clear()
-            st.session_state.pop("limits_cache", None)
-            st.success(f"Configuration saved to {config_path} and reloaded!")
-            st.balloons()
+                out_dir = os.path.dirname(os.path.abspath(config_path))
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                if config_ext == ".json":
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(records, f, indent=2)
+                else:
+                    edited_df.to_csv(config_path, index=False)
+                get_configs.clear()
+                st.session_state.pop("limits_cache", None)
+                st.success(f"Configuration saved to {config_path} and reloaded!")
+                st.balloons()
         except Exception as e:
-            st.error(f"Failed to save configuration: {e}")
+            st.error(public_error("Unable to apply the configuration", e))
+
+    cfg_csv.download_button(
+        "Download CSV",
+        configuration_csv_bytes(edited_df),
+        file_name="components.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    cfg_json.download_button(
+        "Download JSON",
+        configuration_json_bytes(edited_df),
+        file_name="components.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 
     st.divider()
 
@@ -1457,7 +1746,7 @@ elif mode == "Configuration Editor":
     try:
         _current = _read_global_defaults(_config_py)
     except Exception as e:
-        st.error(f"Could not read config.py: {e}")
+        st.error(public_error("Unable to read global defaults", e))
         _current = {}
 
     if _current:
@@ -1472,19 +1761,33 @@ elif mode == "Configuration Editor":
                     _new_vals[key] = st.number_input(spec["label"], value=float(cur),
                                                       step=1.0, format="%.1f",
                                                       help=spec["help"], key=f"gd_{key}")
-            submitted = st.form_submit_button("Save Global Defaults", type="primary")
+            submitted = st.form_submit_button(
+                "Apply Session Defaults" if cloud_mode else "Save Global Defaults",
+                type="primary",
+            )
 
         if submitted:
             try:
-                _write_global_defaults(_config_py, _new_vals)
-                for _k in list(sys.modules.keys()):
-                    if _k.startswith("thermal_analyzer"):
-                        del sys.modules[_k]
+                if cloud_mode:
+                    st.session_state["session_global_defaults"] = _new_vals
+                else:
+                    _write_global_defaults(_config_py, _new_vals)
                 get_configs.clear()
                 load_run_and_stats.clear()
                 st.session_state.pop("limits_cache", None)
                 st.session_state.pop("steady_cache", None)
-                st.success("Global defaults saved. Reloading dashboard...")
+                st.success(
+                    "Session defaults applied."
+                    if cloud_mode
+                    else "Global defaults saved. Reloading dashboard..."
+                )
                 st.rerun()
             except Exception as e:
-                st.error(f"Failed to save global defaults: {e}")
+                st.error(public_error("Unable to apply global defaults", e))
+
+        st.download_button(
+            "Download Global Defaults",
+            json.dumps(_new_vals, indent=2).encode("utf-8"),
+            file_name="global_defaults.json",
+            mime="application/json",
+        )

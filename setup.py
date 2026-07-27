@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="thermal_analyzer",
-    version="0.1.0",
+    version="0.2.0",
     description="A Python package for analyzing thermal test data from Excel sheets.",
     author="Your Name",
     packages=find_packages(),

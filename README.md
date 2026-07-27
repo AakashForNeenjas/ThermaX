@@ -76,23 +76,58 @@ CLI outputs:
 Run the dashboard (recommended command that does not require PowerShell script activation):
 
 ```powershell
-& .\.venv\Scripts\python.exe -m streamlit run thermal_analyzer\ui\dashboard.py
+& .\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
 ```
 
 Dashboard modes:
-- Single Run Analysis: upload an Excel file, compute stats, limits, steady state, plots, and optional HTML report.
-- Campaign Analysis: analyze a folder of runs and generate a campaign report.
-- Component Comparison: compare one component across runs with plots and optional report.
-- Samples Comparison (A vs B): match runs by metadata and compare temperature deltas.
-- Configuration Editor: edit and save `config/components.csv` from the UI.
+- Single Run Analysis: select the worksheet, time column, temperature channels,
+  and °C/°F input unit before analysis.
+- Campaign Analysis: upload multiple runs in a browser or select a local folder
+  in the desktop build.
+- Component Comparison: compare one component across uploaded or local runs.
+- Samples Comparison (A vs B): deterministically match runs by selected metadata
+  fields, with ambiguity/unmatched reporting and optional manual-match CSV.
+- Configuration Editor: apply changes to the current web session and download
+  CSV/JSON; desktop builds can still save locally.
 Download buttons are available for CSV exports (stats, limits, comparisons) where applicable.
+
+### Streamlit Community Cloud
+
+Deploy with:
+
+```text
+Repository: AakashForNeenjas/ThermaX
+Branch: main
+Main file path: streamlit_app.py
+```
+
+The web application does not require access to folders on the user's computer.
+Browser uploads are validated before analysis and are subject to configurable
+file-count, individual-size, and combined-size limits.
+
+Use an optional metadata manifest to override filename metadata:
+
+```csv
+filename,VAC,HV,LV_current,ambient_temp
+run_a.xlsx,255,84,6,50
+```
+
+Use an optional manual-match file for ambiguous A/B campaigns:
+
+```csv
+sample_a_run_id,sample_b_run_id
+sample_a_condition_1,sample_b_condition_1
+```
 
 ## Input data format
 
 Excel file requirements:
-- Must contain a time column named `MCGS_TIME`.
-- All other columns are treated as component temperature channels.
+- The default time column is `MCGS_TIME`, but Single Run Analysis allows users
+  to select another column.
+- Users can select which columns are temperature channels.
 - Time values can be `HH:MM:SS`, `HH:MM:SS.sss`, or numeric seconds.
+- Validation checks workbook readability, time ordering, duplicate timestamps,
+  numeric channels, missing data, flat sensors, and implausible temperatures.
 
 Filename metadata:
 - `thermal_analyzer/utils/naming.py` extracts metadata from the filename, for example:
@@ -129,8 +164,13 @@ Run tests from the repo root:
 ```
 
 Tests cover:
-- Correct time-above-threshold integration.
-- Importability of the Streamlit dashboard and Streamlit availability.
+- Cloud upload limits and campaign loading.
+- Workbook, time-axis, and component validation.
+- Metadata parsing, manifests, ambiguous matches, and manual overrides.
+- Known-answer statistics, thresholds, steady state, physics, normalization,
+  anomaly detection, and worst-case analysis.
+- HTML escaping and report provenance.
+- Streamlit navigation, upload controls, session cleanup, and both entry points.
 
 ## File-by-file reference
 
@@ -170,7 +210,19 @@ This section documents every file currently present in the project tree.
 
 - `thermal_analyzer/io/__init__.py`: Package marker.
 - `thermal_analyzer/io/excel_loader.py`: `load_thermal_run` to read Excel and normalize time.
-- `thermal_analyzer/io/batch_loader.py`: `load_campaign_from_folder` to read a folder into `TestCampaign`.
+- `thermal_analyzer/io/batch_loader.py`: campaign loading from folders or uploaded bytes.
+- `thermal_analyzer/io/sources.py`: portable upload/folder sources and safety limits.
+
+#### `thermal_analyzer/validation`
+
+- `models.py`: structured validation issues and reports.
+- `workbook.py`: workbook, worksheet, time-axis, and component validation.
+
+#### `thermal_analyzer/metadata`
+
+- `parser.py`: configurable decimal/negative filename metadata parsing.
+- `manifest.py`: metadata manifests and explicit manual-match CSV loading.
+- `matching.py`: deterministic matching with unmatched and ambiguous results.
 
 #### `thermal_analyzer/plots`
 
@@ -189,7 +241,11 @@ This section documents every file currently present in the project tree.
 
 - `thermal_analyzer/ui/__init__.py`: Package marker.
 - `thermal_analyzer/ui/cli.py`: CLI entrypoint (`thermal`) with analyze and compare commands.
-- `thermal_analyzer/ui/dashboard.py`: Streamlit UI for interactive analysis and reporting.
+- `thermal_analyzer/ui/dashboard.py`: compatibility dashboard and page orchestration.
+- `thermal_analyzer/ui/components/`: reusable upload and metadata components.
+- `thermal_analyzer/ui/state.py`: session cleanup boundaries.
+- `thermal_analyzer/ui/downloads.py`: in-memory cloud-safe downloads.
+- `streamlit_app.py`: stable root entry point for local and cloud deployment.
 
 #### `thermal_analyzer/utils`
 

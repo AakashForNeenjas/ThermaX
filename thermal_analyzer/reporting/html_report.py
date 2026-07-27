@@ -5,9 +5,13 @@ generic section-based reports (replaces the old generic_report.py).
 Plotly figures are embedded as interactive HTML; no matplotlib dependency.
 Reports include print-friendly CSS so File → Print → Save as PDF works well.
 """
+from datetime import datetime, timezone
+import html as html_lib
 import os
 import pandas as pd
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
+
+from .. import __version__
 
 _COMMON_CSS = """
 <style>
@@ -96,6 +100,7 @@ def generate_html_report_for_run(
     plots_paths: Optional[List[str]] = None,
     output_path: Optional[str] = None,
     plotly_figs: Optional[list] = None,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Generate a professional HTML report for a single thermal run.
@@ -115,11 +120,17 @@ def generate_html_report_for_run(
     HTML string
     """
     has_plotly = bool(plotly_figs)
+    safe_run_id = html_lib.escape(str(run.run_id))
+    provenance_data = {
+        "thermax_version": __version__,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        **(provenance or {}),
+    }
     html: List[str] = []
     html.append(
         f"<!DOCTYPE html><html><head>"
         f"<meta charset='utf-8'>"
-        f"<title>Thermal Report: {run.run_id}</title>"
+        f"<title>Thermal Report: {safe_run_id}</title>"
         f"{_COMMON_CSS}"
         f"{'<!-- Plotly loaded per-figure -->' if has_plotly else ''}"
         f"</head><body>"
@@ -128,7 +139,7 @@ def generate_html_report_for_run(
     html.append(
         "<button class='print-btn' onclick='window.print()'>🖨️ Print / Save as PDF</button>"
     )
-    html.append(f"<h1>Thermal Test Report: {run.run_id}</h1>")
+    html.append(f"<h1>Thermal Test Report: {safe_run_id}</h1>")
 
     # ── Metadata grid ──────────────────────────────────────────────────────────
     html.append("<h2>Test Conditions</h2>")
@@ -136,8 +147,8 @@ def generate_html_report_for_run(
     for k, v in run.metadata.items():
         html.append(
             f"<div class='meta-item'>"
-            f"<span class='meta-label'>{k.upper()}</span>"
-            f"<span class='meta-value'>{v}</span></div>"
+            f"<span class='meta-label'>{html_lib.escape(str(k).upper())}</span>"
+            f"<span class='meta-value'>{html_lib.escape(str(v))}</span></div>"
         )
     ss_status = "ACHIEVED" if steady_state_info.get("steady") else "NOT REACHED"
     ss_color = "green" if steady_state_info.get("steady") else "red"
@@ -149,13 +160,16 @@ def generate_html_report_for_run(
     if not steady_state_info.get("steady"):
         reason = steady_state_info.get("reason", "")
         html.append(
-            f"<div style='grid-column:1/-1;color:red;margin-top:5px'><em>{reason}</em></div>"
+            f"<div style='grid-column:1/-1;color:red;margin-top:5px'><em>"
+            f"{html_lib.escape(str(reason))}</em></div>"
         )
     html.append("</div>")
 
     # Notes
     if run.notes:
-        html.append(f"<p><strong>Notes:</strong> {run.notes}</p>")
+        html.append(
+            f"<p><strong>Notes:</strong> {html_lib.escape(str(run.notes))}</p>"
+        )
 
     # ── Summary KPIs ──────────────────────────────────────────────────────────
     total = len(component_stats) if component_stats is not None else 0
@@ -219,13 +233,9 @@ def generate_html_report_for_run(
         last_cols = [c for c in ["status"] if c in all_cols]
         middle = [c for c in all_cols if c not in first_cols + last_cols]
         lc = lc[first_cols + middle + last_cols]
-        if "status" in lc.columns:
-            lc["status"] = lc["status"].apply(
-                lambda s: f'<span class="status-{s}">{s}</span>'
-            )
         for col in lc.select_dtypes(include=["float", "float64"]).columns:
             lc[col] = lc[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "—")
-        html.append(lc.to_html(escape=False, index=False, classes="table"))
+        html.append(lc.to_html(escape=True, index=False, classes="table"))
     else:
         html.append("<p>No limit data available.</p>")
 
@@ -236,6 +246,17 @@ def generate_html_report_for_run(
         for col in sc.select_dtypes(include=["float"]).columns:
             sc[col] = sc[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "")
         html.append(sc.to_html(index=False, classes="table"))
+
+    html.append("<h2>Analysis Provenance</h2>")
+    html.append("<div class='metadata-grid'>")
+    for key, value in provenance_data.items():
+        html.append(
+            "<div class='meta-item'>"
+            f"<span class='meta-label'>{html_lib.escape(str(key).upper())}</span>"
+            f"<span class='meta-value'>{html_lib.escape(str(value))}</span>"
+            "</div>"
+        )
+    html.append("</div>")
 
     html.append("</div></body></html>")
     result = "\n".join(html)
@@ -272,7 +293,7 @@ def generate_section_html_report(
     html.append(
         f"<!DOCTYPE html><html><head>"
         f"<meta charset='utf-8'>"
-        f"<title>{title}</title>"
+        f"<title>{html_lib.escape(str(title))}</title>"
         f"{_COMMON_CSS}"
         f"</head><body>"
     )
@@ -280,14 +301,14 @@ def generate_section_html_report(
     html.append(
         "<button class='print-btn' onclick='window.print()'>🖨️ Print / Save as PDF</button>"
     )
-    html.append(f"<h1>{title}</h1>")
+    html.append(f"<h1>{html_lib.escape(str(title))}</h1>")
 
     first_plotly = True
     for section in sections:
         if section.get("header"):
-            html.append(f"<h2>{section['header']}</h2>")
+            html.append(f"<h2>{html_lib.escape(str(section['header']))}</h2>")
         if section.get("content"):
-            html.append(f"<p>{section['content']}</p>")
+            html.append(f"<p>{html_lib.escape(str(section['content']))}</p>")
 
         # Plotly figure
         if section.get("plotly_fig") is not None:
@@ -313,7 +334,7 @@ def generate_section_html_report(
             fc = df.copy()
             for col in fc.select_dtypes(include=["float", "float64"]).columns:
                 fc[col] = fc[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "—")
-            html.append(fc.to_html(index=False, classes="table", escape=False))
+            html.append(fc.to_html(index=False, classes="table", escape=True))
 
     html.append("</div></body></html>")
     result = "\n".join(html)
