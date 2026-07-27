@@ -23,6 +23,15 @@ except ImportError:
     tk = None
     filedialog = None
 
+# Streamlit adds the entrypoint's directory to sys.path. Because this file is
+# nested under thermal_analyzer/ui, add the repository root explicitly so the
+# local thermal_analyzer package is importable without a prior `pip install -e`.
+_REPO_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 try:
     from thermal_analyzer.config import load_component_configs, DEFAULT_TIME_COLUMN
     from thermal_analyzer.io.excel_loader import load_thermal_run_from_bytes
