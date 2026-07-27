@@ -35,7 +35,10 @@ if _REPO_ROOT not in sys.path:
 try:
     from thermal_analyzer.config import load_component_configs, DEFAULT_TIME_COLUMN
     from thermal_analyzer.io.excel_loader import load_thermal_run_from_bytes
-    from thermal_analyzer.io.batch_loader import load_campaign_from_folder
+    from thermal_analyzer.io.batch_loader import (
+        load_campaign_from_folder,
+        load_campaign_from_uploads,
+    )
     from thermal_analyzer.models import TestCampaign
     from thermal_analyzer.analysis.stats import compute_component_stats
     from thermal_analyzer.analysis.thresholds import evaluate_limits
@@ -253,6 +256,75 @@ def folder_picker_widget(label: str, session_key: str) -> str:
             "access folders on your computer."
         )
     return st.session_state.get(session_key, "")
+
+
+def campaign_source_widget(label: str, key_prefix: str) -> dict:
+    """Select a desktop folder or upload multiple Excel files in a browser."""
+    if _folder_dialog_available():
+        source_type = st.radio(
+            f"{label} input",
+            ["Folder", "Upload Excel files"],
+            horizontal=True,
+            key=f"{key_prefix}_source_type",
+        )
+    else:
+        source_type = "Upload Excel files"
+
+    if source_type == "Folder":
+        return {
+            "type": "folder",
+            "path": folder_picker_widget(label, f"{key_prefix}_folder_path"),
+            "files": [],
+        }
+
+    uploaded_files = st.file_uploader(
+        label,
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key=f"{key_prefix}_uploads",
+        help="Select all Excel run files that belong to this campaign.",
+    )
+    return {
+        "type": "uploads",
+        "path": "",
+        "files": uploaded_files or [],
+    }
+
+
+def campaign_source_ready(source: dict) -> bool:
+    if source["type"] == "folder":
+        return bool(source["path"])
+    return bool(source["files"])
+
+
+def load_campaign_source(source: dict, component_configs) -> tuple:
+    """Load a campaign selected with campaign_source_widget."""
+    if source["type"] == "folder":
+        path = source["path"]
+        if not os.path.isdir(path):
+            raise ValueError("Selected path is not a valid folder.")
+        campaign = load_campaign_from_folder(path, component_configs)
+        return campaign, {}, os.path.basename(os.path.normpath(path))
+
+    uploaded_pairs = [
+        (uploaded_file.name, uploaded_file.getvalue())
+        for uploaded_file in source["files"]
+    ]
+    campaign, errors = load_campaign_from_uploads(
+        uploaded_pairs,
+        component_configs,
+        DEFAULT_TIME_COLUMN,
+    )
+    return campaign, errors, "uploaded_campaign"
+
+
+def show_campaign_load_errors(errors: dict) -> None:
+    if not errors:
+        return
+    st.warning(f"Skipped {len(errors)} file(s) that could not be loaded.")
+    with st.expander("Show skipped files"):
+        for file_name, error in errors.items():
+            st.error(f"{file_name}: {error}")
 
 
 # ── Inline run-matching (replaces matching.py) ────────────────────────────────
@@ -660,33 +732,36 @@ if mode == "Single Run Analysis":
 # ══════════════════════════════════════════════════════════════════════════════
 elif mode == "Campaign Analysis":
     st.header("Campaign Analysis")
-    st.markdown("Select the folder containing all Excel run files for this campaign.")
+    st.markdown("Select all Excel run files that belong to this campaign.")
 
-    folder_path = folder_picker_widget("Campaign Folder", "campaign_folder_path")
+    campaign_source = campaign_source_widget("Campaign files", "campaign")
 
     if "campaign_results" not in st.session_state:
         st.session_state["campaign_results"] = None
 
-    if folder_path:
+    if campaign_source_ready(campaign_source):
         if st.button("Analyze Campaign"):
-            if os.path.isdir(folder_path):
+            try:
                 with st.spinner("Loading and analyzing files..."):
-                    campaign = load_campaign_from_folder(folder_path, configs)
+                    campaign, load_errors, campaign_name = load_campaign_source(
+                        campaign_source, configs
+                    )
+                    show_campaign_load_errors(load_errors)
                     if campaign.runs:
                         worst = get_worst_case_components(campaign, configs, top_n=20)
                         st.session_state["campaign_results"] = {
                             "campaign": campaign,
                             "worst": worst,
-                            "folder_name": os.path.basename(folder_path),
-                            "folder_path": folder_path,
+                            "folder_name": campaign_name,
+                            "folder_path": campaign_source.get("path", ""),
                         }
                         st.success(f"Loaded {len(campaign.runs)} runs.")
                     else:
                         st.warning("No valid Excel files found.")
-            else:
-                st.error("Selected path is not a valid folder.")
+            except Exception as exc:
+                st.error(f"Unable to load campaign: {exc}")
     else:
-        st.info("Select a folder to begin.")
+        st.info("Upload one or more Excel files to begin.")
 
     if st.session_state["campaign_results"]:
         res = st.session_state["campaign_results"]
@@ -894,23 +969,27 @@ elif mode == "Campaign Analysis":
 # ══════════════════════════════════════════════════════════════════════════════
 elif mode == "Component Comparison":
     st.header("Component Comparison")
-    st.markdown("Select the folder containing run Excel files to compare a single component across all of them.")
+    st.markdown("Select the run Excel files used to compare a component.")
 
-    comp_folder = folder_picker_widget("Runs Folder", "comp_folder_path")
+    component_source = campaign_source_widget("Run files", "component_comparison")
 
     if "cc_campaign" not in st.session_state:
         st.session_state["cc_campaign"] = None
 
-    if comp_folder:
+    if campaign_source_ready(component_source):
         if st.button("Load Files", key="cc_load"):
-            if os.path.isdir(comp_folder):
+            try:
                 with st.spinner("Loading files..."):
-                    st.session_state["cc_campaign"] = load_campaign_from_folder(comp_folder, configs)
+                    campaign, load_errors, _campaign_name = load_campaign_source(
+                        component_source, configs
+                    )
+                    show_campaign_load_errors(load_errors)
+                    st.session_state["cc_campaign"] = campaign
                     st.success(f"Loaded {len(st.session_state['cc_campaign'].runs)} runs.")
-            else:
-                st.error("Invalid folder path.")
+            except Exception as exc:
+                st.error(f"Unable to load files: {exc}")
     else:
-        st.info("Select a folder to begin.")
+        st.info("Upload one or more Excel files to begin.")
         st.session_state["cc_campaign"] = None
 
     if st.session_state["cc_campaign"]:
@@ -1005,24 +1084,36 @@ elif mode == "Component Comparison":
 # ══════════════════════════════════════════════════════════════════════════════
 elif mode == "Samples Comparison (A vs B)":
     st.header("Samples Comparison (A vs B)")
-    st.markdown("Select a folder for each sample. Runs are matched by operating conditions.")
+    st.markdown(
+        "Select the Excel runs for each sample. Runs are matched by operating "
+        "conditions parsed from their filenames."
+    )
 
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Sample A — Reference**")
-        folder_a = folder_picker_widget("Sample A Folder", "sample_a_folder_path")
+        source_a = campaign_source_widget("Sample A files", "sample_a")
     with col2:
         st.markdown("**Sample B — DUT / New Design**")
-        folder_b = folder_picker_widget("Sample B Folder", "sample_b_folder_path")
+        source_b = campaign_source_widget("Sample B files", "sample_b")
 
     if st.button("Compare Samples", key="sab_compare"):
-        if folder_a and folder_b:
-            if not os.path.isdir(folder_a) or not os.path.isdir(folder_b):
-                st.error("Both paths must be valid folders.")
-            else:
+        if not campaign_source_ready(source_a) or not campaign_source_ready(source_b):
+            st.error("Select files for both Sample A and Sample B.")
+        else:
+            try:
                 with st.spinner("Loading and matching samples..."):
-                    camp_a = load_campaign_from_folder(folder_a, configs)
-                    camp_b = load_campaign_from_folder(folder_b, configs)
+                    camp_a, errors_a, _name_a = load_campaign_source(source_a, configs)
+                    camp_b, errors_b, _name_b = load_campaign_source(source_b, configs)
+                    show_campaign_load_errors(
+                        {f"Sample A / {name}": error for name, error in errors_a.items()}
+                    )
+                    show_campaign_load_errors(
+                        {f"Sample B / {name}": error for name, error in errors_b.items()}
+                    )
+            except Exception as exc:
+                st.error(f"Unable to load samples: {exc}")
+            else:
                 matches = match_runs_by_metadata(camp_a, camp_b)
                 st.info(f"Matched {len(matches)} runs based on operating conditions.")
 
@@ -1098,8 +1189,6 @@ elif mode == "Samples Comparison (A vs B)":
                             "Download Report (HTML)", st.session_state["sab_report_html"],
                             file_name="samples_report.html", mime="text/html",
                         )
-        else:
-            st.error("Please select folders for both Sample A and Sample B.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MODE: File vs File Comparison

@@ -1,12 +1,12 @@
 import os
 import json
 import logging
-from typing import Dict
+from typing import Dict, Iterable, Tuple
 
 from ..models import TestCampaign, ComponentConfig
 from ..config import DEFAULT_TIME_COLUMN
 from ..utils.naming import parse_metadata_from_filename
-from .excel_loader import load_thermal_run
+from .excel_loader import load_thermal_run, load_thermal_run_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -69,3 +69,35 @@ def load_campaign_from_folder(
             logger.error(f"Failed to load {f}: {e}")
 
     return TestCampaign(runs=runs)
+
+
+def load_campaign_from_uploads(
+    files: Iterable[Tuple[str, bytes]],
+    component_configs: Dict[str, ComponentConfig],
+    time_column: str = DEFAULT_TIME_COLUMN,
+) -> tuple[TestCampaign, Dict[str, str]]:
+    """
+    Load a campaign from browser-uploaded Excel files.
+
+    ``files`` contains ``(filename, content)`` pairs. Filename metadata is
+    parsed in the same way as folder campaigns. A mapping of skipped filenames
+    to their error messages is returned so the UI can report partial failures.
+    """
+    runs = []
+    errors: Dict[str, str] = {}
+
+    for file_name, file_bytes in files:
+        try:
+            run = load_thermal_run_from_bytes(
+                file_bytes,
+                file_name,
+                component_configs,
+                time_column,
+            )
+            run.metadata.update(parse_metadata_from_filename(run.run_id))
+            runs.append(run)
+        except Exception as exc:
+            logger.error("Failed to load uploaded file %s: %s", file_name, exc)
+            errors[file_name] = str(exc)
+
+    return TestCampaign(runs=runs), errors
